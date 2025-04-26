@@ -38,7 +38,6 @@ pipeline {
                 """
             }
         }
-    }
     post {
         always {
             echo 'This always runs, cleanup or notifications.'
