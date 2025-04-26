@@ -37,6 +37,7 @@ pipeline {
                 """
             }
         }
+    }
     post {
         always {
             echo 'This always runs, cleanup or notifications.'
@@ -54,5 +55,4 @@ pipeline {
             echo 'Build status changed from last run.'
         }
     }
-}
 }
