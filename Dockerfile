@@ -10,6 +10,9 @@ WORKDIR /app
 # Clone your repo (OR you can COPY if you have the code locally)
 # RUN git clone https://github.com/BoredAbhi/Requests-API-Tests.git .
 
+# Copy everything from the Jenkins workspace into the container
+COPY . .
+
 # Install dependencies (you should have a requirements.txt with behave etc.)
 RUN pip install --no-cache-dir -r requirements.txt
 
