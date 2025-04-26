@@ -29,7 +29,6 @@ pipeline {
                 '''
             }
         }
-        }
         stage('Deploy') {
             steps {
                 echo "Deploying to ${params.ENV} environment"
