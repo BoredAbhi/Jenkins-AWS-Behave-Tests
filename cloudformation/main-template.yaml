@@ -1,8 +1,225 @@
----
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Jenkins on EC2 via Docker, behind ALB, with ASG and S3 reporting
+
+Parameters:
+  KeyName:
+    Description: EC2 KeyPair for SSH access
+    Type: AWS::EC2::KeyPair::KeyName
+
 Resources:
-  MyInstance:
-    Type: AWS::EC2::Instance
+
+  JenkinsVPC:
+    Type: AWS::EC2::VPC
     Properties:
-      AvailabilityZone: us-east-1a
-      ImageId: ami-a4c7edb2
-      InstanceType: t2.micro
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: JenkinsVPC
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref JenkinsVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref JenkinsVPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  JenkinsSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref JenkinsVPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: JenkinsSubnetA
+
+  JenkinsSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref JenkinsVPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: JenkinsSubnetB
+
+  SubnetRouteAssocA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref JenkinsSubnetA
+      RouteTableId: !Ref PublicRouteTable
+
+  SubnetRouteAssocB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref JenkinsSubnetB
+      RouteTableId: !Ref PublicRouteTable
+
+  JenkinsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow SSH, HTTP, and ALB traffic
+      VpcId: !Ref JenkinsVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: 0.0.0.0/0
+
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP access to ALB
+      VpcId: !Ref JenkinsVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  TestReportsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "jenkins-test-reports-${AWS::AccountId}"
+
+  JenkinsInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref JenkinsRole
+
+  JenkinsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: JenkinsS3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub "arn:aws:s3:::jenkins-test-reports-${AWS::AccountId}/*"
+
+  JenkinsLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: jenkins-launch-template
+      LaunchTemplateData:
+        InstanceType: t3.micro
+        KeyName: !Ref KeyName
+        ImageId: ami-0c02fb55956c7d316 # Amazon Linux 2 AMI (update based on region if needed)
+        SecurityGroupIds:
+          - !Ref JenkinsSecurityGroup
+        IamInstanceProfile:
+          Name: !Ref JenkinsInstanceProfile
+
+        # Note on using jenkins with volume: Even though this helps on a single EC2 instance, ASG instances are stateless — so every time a new instance launches, it'll still start with a clean volume.
+
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            yum update -y
+            amazon-linux-extras install docker -y
+            service docker start
+            usermod -a -G docker ec2-user
+
+            mkdir -p /jenkins_home
+            chmod 777 /jenkins_home
+
+            docker run -d \
+              -v /jenkins_home:/var/jenkins_home \
+              -p 8080:8080 -p 50000:50000 \
+              --name jenkins \
+              jenkins/jenkins:lts
+
+
+  JenkinsTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: jenkins-target-group
+      Port: 8080
+      Protocol: HTTP
+      VpcId: !Ref JenkinsVPC
+      TargetType: instance
+      HealthCheckPath: /
+      Matcher:
+        HttpCode: 200-399
+
+  JenkinsALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: jenkins-alb
+      Subnets:
+        - !Ref JenkinsSubnetA
+        - !Ref JenkinsSubnetB
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Scheme: internet-facing
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: '60'
+
+  JenkinsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref JenkinsTargetGroup
+      LoadBalancerArn: !Ref JenkinsALB
+      Port: 80
+      Protocol: HTTP
+
+  JenkinsASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+        - !Ref JenkinsSubnetA
+        - !Ref JenkinsSubnetB
+      LaunchTemplate:
+        LaunchTemplateId: !Ref JenkinsLaunchTemplate
+        Version: !GetAtt JenkinsLaunchTemplate.LatestVersionNumber
+      MinSize: "1"
+      MaxSize: "2"
+      DesiredCapacity: "1"
+      TargetGroupARNs:
+        - !Ref JenkinsTargetGroup
+
+Outputs:
+
+  ALBEndpoint:
+    Description: Public URL to access Jenkins
+    Value: !Sub "http://${JenkinsALB.DNSName}"
+
+  S3Bucket:
+    Description: S3 bucket used for storing test reports
+    Value: !Ref TestReportsBucket
