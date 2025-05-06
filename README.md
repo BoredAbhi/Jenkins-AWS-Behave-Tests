@@ -3,6 +3,9 @@
 ### Description:
 This project demonstrates the setup of a scalable Jenkins CI/CD pipeline on AWS, utilizing an Auto Scaling Group (ASG), Application Load Balancer (ALB), and Docker containers. It showcases key AWS services like EC2, VPC, IAM, S3, and more, providing a robust and automated solution for continuous integration and delivery. The BDD code is a sample Behave project to test Jenkins intergration. It uses `requests` to hit an API and check if response is success.
 
+### Cloudformation Template:
+![cf-template](docs/aws-architecture.png)
+
 ### Technologies Used:
 * AWS (VPC, EC2, S3, IAM, Auto Scaling, ALB)
 * Docker (for Jenkins container)
